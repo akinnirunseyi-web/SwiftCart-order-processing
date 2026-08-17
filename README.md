@@ -374,12 +374,19 @@ Expected and observed result:
 - The execution reached **Payment Failed** and intentionally displayed `Failed`.
 - Fulfilment and DynamoDB storage did not execute.
 
-Evidence:
+**Evidence:**
 
-- `07-payment-retries.png`
-- `08-payment-catch-path.png`
-- `09-sns-payment-failure.png`
-- `10-payment-idempotency-log.png`
+**Payment retry attempts**
+![Payment retry attempts](screenshots/08-payment-retries.png)
+
+**Payment failure path**
+![Payment failure path](screenshots/09-payment-failure-path.png)
+
+**SNS payment failure notification**
+![SNS payment failure notification](screenshots/10-sns-payment-failure.png)
+
+**Payment idempotency and simulated failure log**
+![Payment idempotency log](screenshots/11-payment-idempotency-log.png)
 
 ## Evidence checklist
 
