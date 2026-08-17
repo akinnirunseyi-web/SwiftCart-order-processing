@@ -310,9 +310,17 @@ Expected and observed result:
 - Payment, fulfilment, SNS, and DynamoDB storage did not execute.
 - `ORD-1002` was not stored as a completed order.
 
-Evidence:
+**Evidence: Invalid order execution failure**
 
-- `06-invalid-order-path.png`
+![Invalid order execution failure](screenshots/06-invalid-order-failure.png)
+
+The execution failed at the Invalid Order state because the order did not pass validation. The workflow therefore stopped before payment processing.
+
+**Evidence: Invalid order state-machine path**
+
+![Invalid order state-machine path](screenshots/07-invalid-order-path.png)
+
+The execution path confirms that the invalid order was routed from the validation decision to the Invalid Order fail state. Charge Payment, Wait 5 Seconds, Fulfil Order, DynamoDB storage and SNS notification were not executed.
 
 ### Test 3: Payment-failure path
 
