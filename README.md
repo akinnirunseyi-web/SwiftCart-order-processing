@@ -390,7 +390,7 @@ Expected and observed result:
 
 ## Lessons learned
 
-- A state machine makes multi-step serverless processing easier to observe and control than direct Lambda-to-Lambda calls.
+- AWS Step Functions made the multi-step serverless processing easier to observe, control and troubleshoot than direct Lambda-to-Lambda calls.
 - Choice states keep invalid data away from payment and fulfilment services.
 - Retry and exponential backoff handle temporary failures without custom retry loops.
 - Catch provides a deliberate recovery route after retries are exhausted.
