@@ -68,7 +68,7 @@ The solution contains the following AWS services:
 | AWS IAM | Controls the permissions used by Lambda and Step Functions. |
 | AWS CloudFormation | Defines and deploys the infrastructure and application code. |
 
-![SwiftCart solution architecture](screenshots/00-swiftcart-architecture.jpg)
+![SwiftCart solution architecture](screenshots/SwiftCart%20Order%20Processing.jpg)
 
 ### Orchestration versus choreography
 
@@ -78,7 +78,7 @@ SwiftCart uses orchestration. Step Functions is the central coordinator and expl
 
 The state-flow diagram presents the logical execution paths implemented by the Step Functions state machine. It shows the valid-order route, the invalid-order decision, the payment Retry and Catch behaviour, direct SNS notifications, the five-second Wait state, and the successful and failed end states.
 
-![SwiftCart Step Functions state-flow diagram](screenshots/00b-state-machine-flow.png)
+![SwiftCart Step Functions state-flow diagram](screenshots/SwiftCart%20Order%20Processing%20State%20Flow.jpg)
 
 > **Figure 2:** SwiftCart order-processing state flow, including the happy path, invalid-order path and payment-failure path.
 
