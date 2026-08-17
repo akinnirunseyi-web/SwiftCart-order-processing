@@ -388,19 +388,6 @@ Expected and observed result:
 **Payment idempotency and simulated failure log**
 ![Payment idempotency log](screenshots/11-payment-idempotency-log.png)
 
-## Evidence checklist
-
-- `01-stack-create-complete.png`
-- `02-state-machine-graph.png`
-- `03-happy-path.png`
-- `04-dynamodb-order.png`
-- `05-sns-success.png`
-- `06-invalid-order-path.png`
-- `07-payment-retries.png`
-- `08-payment-catch-path.png`
-- `09-sns-payment-failure.png`
-- `10-payment-idempotency-log.png`
-
 ## Lessons learned
 
 - A state machine makes multi-step serverless processing easier to observe and control than direct Lambda-to-Lambda calls.
@@ -410,15 +397,3 @@ Expected and observed result:
 - Idempotency requires a stable key and, in production, persistent/provider-side enforcement.
 - CloudFormation provides consistent deployment but must account for restrictions imposed by training environments.
 - CloudWatch and Step Functions execution history provide complementary operational evidence.
-
-## Cleanup
-
-At the end of the demonstration:
-
-1. Open AWS CloudFormation.
-2. Select the SwiftCart stack.
-3. Choose **Delete** and confirm.
-4. Wait until the stack disappears from active stacks or deletion completes.
-5. Check whether any log groups or subscriptions remain and remove them if required by the lab instructions.
-
-Do not delete the stack until all screenshots, test evidence, and the recorded demonstration have been completed.
