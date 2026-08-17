@@ -262,11 +262,15 @@ Expected and observed result:
 
 The DynamoDB record showed `isValid: true`, `paymentStatus: PAID`, `fulfilmentStatus: FULFILLED`, `orderAmount: 150`, and the completed processing information.
 
-Evidence:
+**Evidence:**
+**Successful Step Functions execution**
+![Happy-path Step Functions execution](screenshots/03-happy-path.png)
 
-- `03-happy-path.png`
-- `04-dynamodb-order.png`
-- `05-sns-success.png`
+**Completed order stored in DynamoDB**
+![Successful order stored in DynamoDB](screenshots/04-dynamodb-order.png)
+
+**SNS success notification**
+![Successful order SNS notification](screenshots/05-sns-success.png)
 
 ### Test 2: Invalid-order path
 
