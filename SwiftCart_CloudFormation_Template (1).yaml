@@ -1,0 +1,532 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  SwiftCart serverless order-processing workflow using AWS Step Functions,
+  Lambda, DynamoDB, SNS, CloudWatch Logs, and least-privilege IAM roles.
+
+Parameters:
+  NotificationEmail:
+    Type: String
+    Description: Email address that will receive SwiftCart success and failure notifications.
+    AllowedPattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+    ConstraintDescription: Enter a valid email address.
+
+  UseExistingLabRole:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: >-
+      Use the AWS Academy LabRole instead of creating IAM roles. Keep this set
+      to true in the Learner Lab; use false only in an account that permits
+      CloudFormation to create IAM roles.
+
+Conditions:
+  UseLabRole: !Equals [!Ref UseExistingLabRole, 'true']
+  CreateDedicatedRoles: !Equals [!Ref UseExistingLabRole, 'false']
+
+Resources:
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: orderId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: orderId
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  OrderNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: SwiftCart Order Notifications
+      KmsMasterKeyId: alias/aws/sns
+
+  OrderNotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+      TopicArn: !Ref OrderNotificationTopic
+
+  ValidateOrderLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-validate-order'
+      RetentionInDays: 30
+
+  ChargePaymentLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-charge-payment'
+      RetentionInDays: 30
+
+  FulfilOrderLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-fulfil-order'
+      RetentionInDays: 30
+
+  StateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/vendedlogs/states/${AWS::StackName}-order-processing'
+      RetentionInDays: 30
+
+  BasicLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Condition: CreateDedicatedRoles
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WriteSwiftCartLambdaLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !GetAtt ValidateOrderLogGroup.Arn
+                  - !GetAtt ChargePaymentLogGroup.Arn
+
+  FulfilLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Condition: CreateDedicatedRoles
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WriteFulfilmentLogsAndOrders
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt FulfilOrderLogGroup.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !GetAtt OrdersTable.Arn
+
+  ValidateOrderFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ValidateOrderLogGroup
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-validate-order'
+      Description: Validates incoming SwiftCart orders and preserves the complete order payload.
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !If
+        - UseLabRole
+        - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/LabRole'
+        - !GetAtt BasicLambdaExecutionRole.Arn
+      Timeout: 10
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          import json
+          import logging
+          from copy import deepcopy
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+              order = deepcopy(event)
+              order_id = order.get("orderId", "UNKNOWN")
+              errors = []
+
+              customer = order.get("customer")
+              product = order.get("product")
+
+              if not order.get("orderId"):
+                  errors.append("orderId is required")
+
+              if not isinstance(customer, dict):
+                  errors.append("customer information is required")
+              else:
+                  for field in ("customerId", "name", "email"):
+                      if not customer.get(field):
+                          errors.append(f"customer.{field} is required")
+
+              if not isinstance(product, dict):
+                  errors.append("product information is required")
+              else:
+                  for field in ("productId", "productName"):
+                      if not product.get(field):
+                          errors.append(f"product.{field} is required")
+
+                  quantity = product.get("quantity")
+                  inventory = product.get("availableInventory")
+                  unit_price = product.get("unitPrice")
+
+                  if not isinstance(quantity, (int, float)) or quantity <= 0:
+                      errors.append("product.quantity must be greater than zero")
+                  if not isinstance(inventory, (int, float)) or inventory < 0:
+                      errors.append("product.availableInventory must be zero or greater")
+                  if isinstance(quantity, (int, float)) and isinstance(inventory, (int, float)):
+                      if quantity > inventory:
+                          errors.append("requested quantity exceeds available inventory")
+                  if not isinstance(unit_price, (int, float)) or unit_price <= 0:
+                      errors.append("product.unitPrice must be greater than zero")
+
+                  order_amount = order.get("orderAmount")
+                  if not isinstance(order_amount, (int, float)) or order_amount <= 0:
+                      errors.append("orderAmount must be greater than zero")
+                  elif isinstance(quantity, (int, float)) and isinstance(unit_price, (int, float)):
+                      expected_amount = round(quantity * unit_price, 2)
+                      if round(order_amount, 2) != expected_amount:
+                          errors.append("orderAmount must equal quantity multiplied by unitPrice")
+
+              scenario = str(order.get("paymentScenario", "")).upper()
+              if scenario not in ("SUCCESS", "FAIL"):
+                  errors.append("paymentScenario must be SUCCESS or FAIL")
+
+              order["isValid"] = len(errors) == 0
+              order["validationErrors"] = errors
+              order["validationMessage"] = (
+                  "Order passed validation" if not errors else "Order failed validation"
+              )
+
+              logger.info(json.dumps({
+                  "orderId": order_id,
+                  "isValid": order["isValid"],
+                  "validationErrors": errors
+              }))
+              return order
+
+  ChargePaymentFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ChargePaymentLogGroup
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-charge-payment'
+      Description: Simulates idempotent SwiftCart payment success or a retryable payment failure.
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !If
+        - UseLabRole
+        - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/LabRole'
+        - !GetAtt BasicLambdaExecutionRole.Arn
+      Timeout: 10
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          import json
+          import logging
+          from copy import deepcopy
+          from datetime import datetime, timezone
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          class PaymentTransientError(Exception):
+              pass
+
+          def lambda_handler(event, context):
+              order = deepcopy(event)
+              order_id = order.get("orderId", "UNKNOWN")
+              scenario = str(order.get("paymentScenario", "SUCCESS")).upper()
+
+              logger.info(json.dumps({
+                  "orderId": order_id,
+                  "paymentScenario": scenario,
+                  "idempotencyKey": order_id
+              }))
+
+              if scenario == "FAIL":
+                  raise PaymentTransientError(
+                      f"Simulated temporary payment failure for order {order_id}"
+                  )
+
+              order["paymentStatus"] = "PAID"
+              order["paymentId"] = f"PAY-{order_id}"
+              order["idempotencyKey"] = order_id
+              order["paymentTimestamp"] = datetime.now(timezone.utc).isoformat()
+              return order
+
+  FulfilOrderFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: FulfilOrderLogGroup
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-fulfil-order'
+      Description: Fulfils successfully paid SwiftCart orders and stores completed records in DynamoDB.
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !If
+        - UseLabRole
+        - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/LabRole'
+        - !GetAtt FulfilLambdaExecutionRole.Arn
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          ORDERS_TABLE: !Ref OrdersTable
+      Code:
+        ZipFile: |
+          import json
+          import logging
+          import os
+          from copy import deepcopy
+          from datetime import datetime, timezone
+          from decimal import Decimal
+          import boto3
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          table = boto3.resource("dynamodb").Table(os.environ["ORDERS_TABLE"])
+
+          def lambda_handler(event, context):
+              order = deepcopy(event)
+              order_id = order.get("orderId", "UNKNOWN")
+
+              if order.get("paymentStatus") != "PAID":
+                  raise ValueError("Only successfully paid orders can be fulfilled")
+
+              order["fulfilmentStatus"] = "FULFILLED"
+              order["processingTimestamp"] = datetime.now(timezone.utc).isoformat()
+
+              dynamodb_item = json.loads(json.dumps(order), parse_float=Decimal)
+              table.put_item(
+                  Item=dynamodb_item,
+                  ConditionExpression=(
+                      "attribute_not_exists(orderId) OR "
+                      "(paymentStatus = :paid AND fulfilmentStatus = :fulfilled)"
+                  ),
+                  ExpressionAttributeValues={
+                      ":paid": "PAID",
+                      ":fulfilled": "FULFILLED"
+                  }
+              )
+
+              logger.info(json.dumps({
+                  "orderId": order_id,
+                  "paymentStatus": order["paymentStatus"],
+                  "fulfilmentStatus": order["fulfilmentStatus"]
+              }))
+              return order
+
+  StepFunctionsExecutionRole:
+    Type: AWS::IAM::Role
+    Condition: CreateDedicatedRoles
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: OrchestrateSwiftCartOrderProcessing
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt ValidateOrderFunction.Arn
+                  - !GetAtt ChargePaymentFunction.Arn
+                  - !GetAtt FulfilOrderFunction.Arn
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref OrderNotificationTopic
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    kms:CallerAccount: !Ref AWS::AccountId
+                    kms:ViaService: !Sub 'sns.${AWS::Region}.amazonaws.com'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: '*'
+
+  OrderProcessingStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${AWS::StackName}-order-processing'
+      StateMachineType: STANDARD
+      RoleArn: !If
+        - UseLabRole
+        - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/LabRole'
+        - !GetAtt StepFunctionsExecutionRole.Arn
+      LoggingConfiguration:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StateMachineLogGroup.Arn
+        IncludeExecutionData: true
+        Level: ALL
+      DefinitionString:
+        !Sub
+          - |
+            {
+              "Comment": "SwiftCart order-processing workflow",
+              "StartAt": "Validate Order",
+              "States": {
+                "Validate Order": {
+                  "Type": "Task",
+                  "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+                  "Parameters": {
+                    "FunctionName": "${ValidateOrderLambdaArn}",
+                    "Payload.$": "$"
+                  },
+                  "OutputPath": "$.Payload",
+                  "Next": "Is Order Valid?"
+                },
+                "Is Order Valid?": {
+                  "Type": "Choice",
+                  "Choices": [
+                    {
+                      "Variable": "$.isValid",
+                      "BooleanEquals": true,
+                      "Next": "Charge Payment"
+                    }
+                  ],
+                  "Default": "Invalid Order"
+                },
+                "Invalid Order": {
+                  "Type": "Fail",
+                  "Error": "InvalidOrder",
+                  "Cause": "The order failed validation and cannot proceed to payment."
+                },
+                "Charge Payment": {
+                  "Type": "Task",
+                  "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+                  "Parameters": {
+                    "FunctionName": "${ChargePaymentLambdaArn}",
+                    "Payload.$": "$"
+                  },
+                  "OutputPath": "$.Payload",
+                  "Retry": [
+                    {
+                      "ErrorEquals": [
+                        "PaymentTransientError",
+                        "States.Timeout",
+                        "Lambda.ServiceException",
+                        "Lambda.AWSLambdaException",
+                        "Lambda.SdkClientException"
+                      ],
+                      "IntervalSeconds": 2,
+                      "BackoffRate": 2.0,
+                      "MaxAttempts": 2
+                    }
+                  ],
+                  "Catch": [
+                    {
+                      "ErrorEquals": ["States.ALL"],
+                      "ResultPath": "$.paymentError",
+                      "Next": "Publish Failure to SNS"
+                    }
+                  ],
+                  "Next": "Wait 5 Seconds"
+                },
+                "Publish Failure to SNS": {
+                  "Type": "Task",
+                  "Resource": "arn:${AWS::Partition}:states:::sns:publish",
+                  "Parameters": {
+                    "TopicArn": "${NotificationTopicArn}",
+                    "Subject": "SwiftCart payment failed",
+                    "Message.$": "States.Format('Payment failed for order {} after all retry attempts were exhausted.', $.orderId)"
+                  },
+                  "Next": "Payment Failed"
+                },
+                "Payment Failed": {
+                  "Type": "Fail",
+                  "Error": "PaymentFailed",
+                  "Cause": "Payment failed after the permitted retry attempts."
+                },
+                "Wait 5 Seconds": {
+                  "Type": "Wait",
+                  "Seconds": 5,
+                  "Next": "Fulfil Order"
+                },
+                "Fulfil Order": {
+                  "Type": "Task",
+                  "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+                  "Parameters": {
+                    "FunctionName": "${FulfilOrderLambdaArn}",
+                    "Payload.$": "$"
+                  },
+                  "OutputPath": "$.Payload",
+                  "Next": "Publish Confirmation to SNS"
+                },
+                "Publish Confirmation to SNS": {
+                  "Type": "Task",
+                  "Resource": "arn:${AWS::Partition}:states:::sns:publish",
+                  "Parameters": {
+                    "TopicArn": "${NotificationTopicArn}",
+                    "Subject": "SwiftCart order confirmed",
+                    "Message.$": "States.Format('Order {} has been successfully paid and fulfilled.', $.orderId)"
+                  },
+                  "Next": "Order Completed"
+                },
+                "Order Completed": {
+                  "Type": "Succeed"
+                }
+              }
+            }
+          - ValidateOrderLambdaArn: !GetAtt ValidateOrderFunction.Arn
+            ChargePaymentLambdaArn: !GetAtt ChargePaymentFunction.Arn
+            FulfilOrderLambdaArn: !GetAtt FulfilOrderFunction.Arn
+            NotificationTopicArn: !Ref OrderNotificationTopic
+
+Outputs:
+  StateMachineArn:
+    Description: ARN of the SwiftCart order-processing state machine.
+    Value: !Ref OrderProcessingStateMachine
+
+  StateMachineName:
+    Description: Name of the SwiftCart order-processing state machine.
+    Value: !GetAtt OrderProcessingStateMachine.Name
+
+  OrdersTableName:
+    Description: DynamoDB table containing completed SwiftCart orders.
+    Value: !Ref OrdersTable
+
+  NotificationTopicArn:
+    Description: SNS topic used for SwiftCart success and failure notifications.
+    Value: !Ref OrderNotificationTopic
+
+  ValidateOrderFunctionName:
+    Description: Validate Order Lambda function name.
+    Value: !Ref ValidateOrderFunction
+
+  ChargePaymentFunctionName:
+    Description: Charge Payment Lambda function name.
+    Value: !Ref ChargePaymentFunction
+
+  FulfilOrderFunctionName:
+    Description: Fulfil Order Lambda function name.
+    Value: !Ref FulfilOrderFunction
